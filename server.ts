@@ -41,6 +41,8 @@ db.exec(`
     is_verified INTEGER DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE INDEX IF NOT EXISTS idx_plate_number ON plates(plate_number);
 `);
 
 // Seed data if empty
@@ -181,11 +183,15 @@ async function startServer() {
       return res.status(400).json({ error: "بيانات غير صالحة" });
     }
 
-    const insertPlate = db.prepare("INSERT INTO plates (plate_number, center_id, production_date, status) VALUES (?, ?, ?, 'issued')");
+    const insertPlate = db.prepare("INSERT OR REPLACE INTO plates (plate_number, center_id, production_date, status) VALUES (?, ?, ?, 'issued')");
     
     const transaction = db.transaction((records) => {
       for (const record of records) {
-        insertPlate.run(record.plate_number, record.center_id, record.production_date);
+        // Normalize plate number: trim and remove multiple spaces
+        const normalizedPlate = record.plate_number?.toString().trim().replace(/\s+/g, ' ');
+        if (normalizedPlate) {
+          insertPlate.run(normalizedPlate, record.center_id, record.production_date);
+        }
       }
     });
 
@@ -209,9 +215,11 @@ async function startServer() {
       return res.status(400).json({ error: "جميع الحقول مطلوبة" });
     }
 
+    const normalizedPlate = plate_number.toString().trim().replace(/\s+/g, ' ');
+
     try {
-      const stmt = db.prepare("INSERT INTO plates (plate_number, center_id, production_date, status) VALUES (?, ?, ?, 'issued')");
-      stmt.run(plate_number, center_id, production_date);
+      const stmt = db.prepare("INSERT OR REPLACE INTO plates (plate_number, center_id, production_date, status) VALUES (?, ?, ?, 'issued')");
+      stmt.run(normalizedPlate, center_id, production_date);
       res.json({ success: true });
     } catch (error: any) {
       if (error.message.includes("UNIQUE constraint failed")) {
@@ -223,7 +231,7 @@ async function startServer() {
   });
 
   app.get("/api/search", (req, res) => {
-    const q = req.query.q as string;
+    const q = (req.query.q as string || "").trim().replace(/\s+/g, ' ');
     if (!q) {
       return res.json([]);
     }
@@ -232,11 +240,18 @@ async function startServer() {
       SELECT plates.plate_number, centers.name as center_name, plates.production_date, plates.status
       FROM plates
       JOIN centers ON plates.center_id = centers.id
-      WHERE plates.plate_number LIKE ?
-      LIMIT 10
+      WHERE plates.plate_number LIKE ? 
+         OR REPLACE(plates.plate_number, ' ', '') LIKE ?
+      ORDER BY 
+        CASE 
+          WHEN plates.plate_number = ? THEN 1
+          WHEN plates.plate_number LIKE ? THEN 2
+          ELSE 3
+        END
+      LIMIT 15
     `);
     
-    const results = stmt.all(`%${q}%`);
+    const results = stmt.all(`%${q}%`, `%${q.replace(/\s/g, '')}%`, q, `${q}%`);
     res.json(results);
   });
 
